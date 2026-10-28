@@ -11,7 +11,7 @@
 Esta guía asume que quieres:
 
 - **Una sola aplicación** (API + web) que se despliega junta, sin microservicios ni CI complejo.
-- **Una base de datos PostgreSQL** y acceso con SQL explícito (sin ORM).
+- **Una base de datos PostgreSQL** y acceso con Sequelize (modelos, asociaciones y migraciones).
 - **Un panel privado** (autenticado) y, si aplica, una **landing pública**.
 - **Multi-tenant**: el cliente es una organización, y cada persona es un usuario con un rol dentro de ella.
 - **Integraciones externas que no bloquean el desarrollo**: sin credenciales, la app funciona en modo simulado.
@@ -20,10 +20,10 @@ Esta guía asume que quieres:
 
 ### Los doce principios que sostienen el proyecto
 
-1. **Sin ORM.** El esquema se lee como el modelo de negocio; los servicios escriben SQL claro.
-2. **El esquema es código.** La app crea/actualiza su propio esquema al arrancar (`ensureSchema()` idempotente). Los cambios aditivos van ahí; las transformaciones de datos van en scripts `migrate-*.js` con `--dry-run`/`--apply`.
-3. **El pool es perezoso y está configurado.** La conexión se abre en la primera consulta: los tests pueden fijar la base antes de usarla. Añade límites, timeouts y SSL explícitos.
-4. **Las capas no se mezclan**: `routes` (endpoints + guards) → `controllers` (HTTP) → `services` (reglas y SQL) → `db` (datos).
+1. **ORM con Sequelize.** Los modelos y las migraciones viven en Sequelize; el esquema sigue siendo código (migraciones versionadas) y los servicios usan los modelos para CRUD/relaciones, reservando SQL explícito (`sequelize.query`) para reportes, agregaciones o bulk donde el ORM no aporta.
+2. **El esquema es código.** Las migraciones de Sequelize son la fuente de verdad y se versionan en el repositorio. Los cambios aditivos van en migraciones; las transformaciones de datos van en migraciones con lógica o scripts `migrate-*.js` con `--dry-run`/`--apply`. En producción nunca se usa `sequelize.sync()`.
+3. **La conexión de Sequelize es perezosa y está configurada.** La instancia no abre conexión hasta la primera consulta: los tests pueden fijar la base antes de usarla. Configura límites de pool, timeouts y SSL explícitos.
+4. **Las capas no se mezclan**: `routes` (endpoints + guards) → `controllers` (HTTP) → `services` (reglas y modelos) → `db`/`models` (datos).
 5. **El tenant sale de la sesión**, nunca del cuerpo de la petición. Si un cliente manda un identificador de organización distinto al suyo, se rechaza.
 6. **Cero secretos en el código.** Todo pasa por configuración; los secretos se cifran con **AES-256-GCM autenticado** (IV + *auth tag*) y una clave derivada con KDF, y la API solo devuelve pistas enmascaradas.
 7. **Todo proveedor externo tiene modo simulado** y se activa por configuración.
@@ -39,12 +39,13 @@ Esta guía asume que quieres:
 
 | Capa | Tecnología | Versión | Nota |
 |---|---|---|---|
-| Runtime | Node.js | >= 20.6 | ESM nativo (`"type": "module"`); `--env-file` disponible |
+| Runtime | Node.js | ^20.19.0 \|\| >=22.12.0 | ESM nativo (`"type": "module"`); `--env-file` disponible |
 | Monorepo | npm workspaces | — | un solo `node_modules` raíz |
-| API | Express | ^5.3 | routers por dominio, sin ORM |
-| Base de datos | PostgreSQL | >= 14 | acceso con `pg` y SQL directo |
+| API | Express | ^5.3 | routers por dominio, ORM Sequelize |
+| Base de datos | PostgreSQL | >= 14 | acceso vía Sequelize (dialecto `postgres`) |
+| ORM | Sequelize | ^6.37 | modelos, asociaciones, migraciones y transacciones |
 | Frontend | React | ^19.3 | SPA con Vite |
-| Build | Vite | ^7.3 | `manualChunks` por familias de dependencias |
+| Build | Vite | ^8.3 | Rolldown + Oxc; `codeSplitting.groups` por familias de dependencias |
 | Estilos | Tailwind CSS | ^4.3 | vía `@tailwindcss/vite` (sin `postcss.config`) |
 | Componentes | Base UI (`@base-ui/react`) | ^1.9 | *headless*: tú controlas el diseño |
 | Iconos | lucide-react | ^1.59 | |
@@ -53,15 +54,15 @@ Esta guía asume que quieres:
 | PDF (opcional) | PDFKit | ^0.20 | documentos imprimibles desde el servidor |
 | Cabeceras | helmet | ^8.3 | CSP con `upgrade-insecure-requests` desactivado en local |
 | Pruebas | `node --test` | nativo | sin jest/vitest ni dependencias de test |
-| Método | Markdown + Gherkin | — | `/specs`, `/plans`, `/features` |
+| Método | Markdown + Gherkin + JSON | — | `/specs`, `/plans`, `/features`, `/receipts` |
 
-**Dependencias del servidor:** `express`, `helmet`, `pg` (+ `pdfkit` si hay documentos). Todo lo demás (hash de contraseñas, cifrado de secretos, cookies, validación, rate limit) se hace con la librería estándar.
+**Dependencias del servidor:** `express`, `helmet`, `sequelize`, `pg` (driver del dialecto) (+ `pdfkit` si hay documentos). Todo lo demás (hash de contraseñas, cifrado de secretos, cookies, validación, rate limit) se hace con la librería estándar. Desarrollo: `sequelize-cli`.
 
 **Dependencias del cliente:** `react`, `react-dom`, `react-router-dom`, `@base-ui/react`, `lucide-react`, `clsx`, `tailwind-merge`, `class-variance-authority`. En desarrollo: `vite`, `@vitejs/plugin-react`, `tailwindcss`, `@tailwindcss/vite`, `vite-plugin-pwa`; en la raíz, `concurrently`.
 
 **Sin CORS:** en producción todo es el mismo origen y en desarrollo Vite hace proxy de `/api`. No añadas un `cors` permisivo “por si acaso”.
 
-> Las versiones de la tabla son mínimos de referencia. Fija el `package-lock.json`, compruébalas con `npm view` y declara `engines` en `package.json`. Node 20.6+ permite `--env-file`, que simplifica las pruebas.
+> Las versiones de la tabla son mínimos de referencia. Fija el `package-lock.json`, compruébalas con `npm view` (especialmente `@base-ui/react`, `vite-plugin-pwa` y `pdfkit`) y declara `engines` en `package.json`. Vite 8 exige Node `^20.19.0 || >=22.12.0`; `--env-file` sigue disponible y simplifica las pruebas.
 
 ---
 
@@ -72,7 +73,7 @@ app/
 ├── AGENTS.md                 # reglas para agentes: método, evidencia, convenciones
 ├── README.md                 # documentación de producto para humanos
 ├── .env.example              # variables documentadas, sin secretos reales
-├── .nvmrc                    # versión de Node (20.x)
+├── .nvmrc                    # Node 20.19+ o 22.12+ (requisito de Vite 8)
 ├── package.json              # workspaces + scripts orquestadores
 ├── specs/                    # SDD + contexto de negocio (ODD)
 │   ├── negocio.md            # modelo de negocio, palancas, ciclo del dinero
@@ -84,6 +85,9 @@ app/
 ├── features/                 # BDD: escenarios Gherkin en español con @s#
 │   ├── <feature>.feature
 │   └── README.md
+├── receipts/                 # RDD: un recibo JSON por tarea T#
+│   ├── T1.json
+│   └── README.md             # esquema, reglas y ejemplos del recibo
 ├── server/
 │   ├── package.json
 │   ├── src/
@@ -91,9 +95,10 @@ app/
 │   │   ├── app.js            # instancia de Express, middlewares, routers
 │   │   ├── config/env.js     # carga de .env sin dependencias
 │   │   ├── db/
-│   │   │   ├── index.js      # pool + ensureSchema() + withTransaction() + resetSchema()
-│   │   │   ├── seeds.js      # datos semilla idempotentes
-│   │   │   └── migrate-*.js  # scripts de migración con --dry-run/--apply
+│   │   │   ├── index.js      # instancia Sequelize + conexión + resetSchema() (solo test)
+│   │   │   └── migrations/   # migraciones versionadas (sequelize-cli/umzug)
+│   │   ├── models/           # modelos Sequelize (uno por entidad) + index.js (asociaciones)
+│   │   ├── seeders/          # datos semilla idempotentes (idempotentes por clave única)
 │   │   ├── lib/
 │   │   │   ├── password.js   # scrypt asíncrono, formato versionado
 │   │   │   ├── crypto.js     # AES-256-GCM con tag, KDF, máscaras
@@ -103,7 +108,7 @@ app/
 │   │   ├── middlewares/
 │   │   │   ├── auth.js       # sesión, guards de rol y de organización
 │   │   │   └── error.js      # manejador central de errores
-│   │   ├── services/         # LÓGICA DE NEGOCIO (SQL directo)
+│   │   ├── services/         # LÓGICA DE NEGOCIO (modelos Sequelize)
 │   │   ├── controllers/      # orquestación HTTP (req/res)
 │   │   ├── routes/           # definición de endpoints (Express Router)
 │   │   └── jobs/             # barridos periódicos in-process
@@ -135,7 +140,7 @@ app/
   "name": "app",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20.6" },
+  "engines": { "node": "^20.19.0 || >=22.12.0" },
   "scripts": {
     "dev": "concurrently -n server,client -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "npm run dev --workspace server",
@@ -182,6 +187,7 @@ const envPath = path.join(findMonorepoRoot(), '.env');
 try {
   for (const line of readFileSync(envPath, 'utf8').split('\n')) {
     const match = line.match(/^\s*(?:export\s+)?([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
+    // Las líneas que no coinciden (vacías o que empiezan con #) se ignoran.
     if (match && process.env[match[1]] === undefined) {
       process.env[match[1]] = match[2].replace(/^(["'])(.*)\1$/, '$2');
     }
@@ -222,112 +228,120 @@ PGSSL               # true si el proveedor exige SSL
 
 ---
 
-## 5. Capa de datos
+## 5. Capa de datos (Sequelize)
 
-`server/src/db/index.js`: pool perezoso y configurado, `ensureSchema()`, `withTransaction()` y `resetSchema()` (solo tests).
-
-```js
-import pg from 'pg';
-
-const DEFAULT_URL = 'postgres://usuario:clave@localhost:5432/app';
-let pool;
-
-export function getPool() {
-  if (!pool) {
-    pool = new pg.Pool({
-      connectionString: process.env.DATABASE_URL ?? DEFAULT_URL,
-      max: Number(process.env.PG_POOL_MAX) || 10,
-      idleTimeoutMillis: 30_000,
-      connectionTimeoutMillis: 5_000,
-      statement_timeout: 15_000,
-      application_name: 'app',
-      ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: true } : undefined,
-    });
-  }
-  return pool;
-}
-
-export function query(text, params) { return getPool().query(text, params); }
-
-export async function withTransaction(fn) {
-  const client = await getPool().connect();
-  try {
-    await client.query('BEGIN');
-    const result = await fn(client);
-    await client.query('COMMIT');
-    return result;
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
-}
-```
-
-- **No anides `withTransaction()`**: pasa el `client` a los servicios. Si de verdad necesitas transacciones anidadas, usa `SAVEPOINT` explícito.
-- No hagas llamadas HTTP ni envíos dentro de una transacción: mantienes la conexión y los locks abiertos.
-- El pool por defecto es pequeño; mide y ajusta `max` según el proveedor. Un `statement_timeout` evita consultas colgadas.
-- Si usas un proveedor gestionado, configura SSL y verifica el certificado; no desactives `rejectUnauthorized` “para que funcione”.
-
-### `ensureSchema()` y `resetSchema()`
-
-`ensureSchema()` es **idempotente**: `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` e índices `IF NOT EXISTS`. Se ejecuta en `createApp()` antes de `ensureSeeds()`. Para evitar carreras entre dos arranques/reinicios solapados, envuélvelo en un lock de asesoría:
+`server/src/db/index.js`: instancia de Sequelize, conexión, transacciones y `resetSchema()` (solo tests). El esquema se gestiona con **migraciones versionadas** (`sequelize-cli`/Umzug), no con `sync()` en producción.
 
 ```js
-await withTransaction(async (client) => {
-  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['ensure_schema']);
-  // ... DDL idempotente ...
+// server/src/db/index.js
+import { Sequelize } from 'sequelize';
+
+const url = process.env.DATABASE_URL ?? 'postgres://usuario:clave@localhost:5432/app';
+
+export const sequelize = new Sequelize(url, {
+  dialect: 'postgres',
+  logging: process.env.NODE_ENV === 'development' ? console.log : false,
+  pool: { max: Number(process.env.PG_POOL_MAX) || 10, idle: 30_000, acquire: 5_000 },
+  dialectOptions: process.env.PGSSL === 'true' ? { ssl: { require: true, rejectUnauthorized: true } } : {},
 });
-```
 
-- `IF NOT EXISTS` **no es un sistema de migraciones**: no cambia tipos, no elimina columnas y no transforma datos. Para eso están los `migrate-*.js`, con transacción, lock y `--dry-run`.
-- `CREATE INDEX CONCURRENTLY` **no puede ejecutarse dentro de una transacción**; para tablas grandes va en un script aparte, fuera de `ensureSchema()`.
-- La app necesita permisos DDL al arrancar. Es el precio de “el esquema es código”; si el entorno lo prohíbe, ejecuta el DDL con un rol de migración y deja a la app solo DML.
+export async function connectDb() { await sequelize.authenticate(); }
+export async function closeDb() { await sequelize.close(); }
 
-`resetSchema()` debe negarse a tocar cualquier base que no sea de test:
+export function withTransaction(fn) {
+  return sequelize.transaction(async (t) => fn(t));
+}
 
-```js
 export async function resetSchema() {
-  const url = process.env.DATABASE_URL ?? '';
-  const dbName = (() => { try { return new URL(url).pathname.replace(/^\//, ''); } catch { return ''; } })();
+  const dbName = (() => { try { return new URL(process.env.DATABASE_URL ?? '').pathname.replace(/^\//, ''); } catch { return ''; } })();
   if (process.env.NODE_ENV !== 'test' || !dbName.endsWith('_test')) {
     throw new Error('resetSchema() solo puede ejecutarse con NODE_ENV=test y una base *_test');
   }
-  await query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
+  await sequelize.dropSchema('public', { cascade: true });
+  await sequelize.createSchema('public');
 }
 ```
 
-- Se llama `resetSchema`, no `dropDatabase`: borra el esquema, no la base.
-- La guardia es obligatoria: un `.env` mal apuntado no debe poder destruir datos de desarrollo o producción.
+- **No uses `sequelize.sync()` en producción**: crea/altera tablas sin control de versiones. Usa migraciones (`npx sequelize-cli db:migrate`) y reserva `sync({ force/alter })` para tests.
+- **Transacciones**: pasa el objeto `transaction` (`t`) a los servicios; no anides transacciones, comparte `t`. No hagas HTTP/envíos dentro.
+- **Pool**: configurado en la instancia; ajusta `max` según proveedor. Con proveedor gestionado, activa SSL con `rejectUnauthorized`.
+- **Modelos**: un archivo por entidad en `server/src/models/` (clase `Model` o `sequelize.define`); las asociaciones se registran en `models/index.js`.
+- **Convención**: elige `underscored: true` (camelCase ↔ snake_case) o manual, y mantenla en todos los modelos.
 
-**Semillas** (`db/seeds.js`): insertan **si falta la fila** por su clave única (`ON CONFLICT DO NOTHING`), no “si la tabla está vacía”. Así una semilla parcial no impide completar el resto. Hazlo en una transacción.
+### Migraciones
 
-```sql
--- Patrón de una tabla: la clave de negocio va con su dueño (tenant), sus marcas de tiempo y sus checks.
-CREATE TABLE IF NOT EXISTS entidades (
-  id integer GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-  org_id integer NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT,
-  nombre text NOT NULL,
-  estado text NOT NULL DEFAULT 'activo'
-    CHECK (estado IN ('activo', 'inactivo')),
-  creado_en timestamptz NOT NULL DEFAULT now(),
-  actualizado_en timestamptz NOT NULL DEFAULT now(),
-  borrado_en timestamptz
-);
+Las migraciones viven en `server/src/db/migrations/` y son la única forma de cambiar el esquema en producción. Cada una exporta `up`/`down` y corre en transacción (Sequelize lo hace por defecto en Postgres).
 
-CREATE INDEX IF NOT EXISTS entidades_org_estado_idx
-  ON entidades (org_id, estado, creado_en DESC)
-  WHERE borrado_en IS NULL;
+```js
+// migrations/20260101-create-organizations.cjs
+// `.cjs` porque el proyecto es ESM; con Umzug puedes usar `export default`.
+module.exports = {
+  async up(qi, Sequelize) {
+    await qi.createTable('organizations', {
+      id: { type: Sequelize.INTEGER, autoIncrement: true, primaryKey: true },
+      nombre: { type: Sequelize.TEXT, allowNull: false },
+      creado_en: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.literal('now()') },
+    });
+    await qi.addIndex('organizations', ['nombre']);
+  },
+  async down(qi) { await qi.dropTable('organizations'); },
+};
 ```
 
-- **`ON DELETE RESTRICT`, no `CASCADE`, en tablas con dinero o documentos.** La organización se da de baja lógicamente; la evidencia contable no se borra en cascada.
-- Indexa siempre `org_id` y las claves foráneas: PostgreSQL **no** crea índices automáticos para FKs.
-- `actualizado_en` no se actualiza solo. Usa un trigger `BEFORE UPDATE` o una convención obligatoria en los servicios; si no, miente.
-- `borrado_en` (baja lógica) + índices parciales `WHERE borrado_en IS NULL`; las consultas de listado filtran por defecto.
-- Para dinero usa `numeric(12,2)` o enteros en la unidad mínima (centavos), nunca `float`. Para instantes, `timestamptz`; para días locales de facturación, `date`.
-- Evita `SELECT *`: columnas explícitas. Para listados grandes, paginación por keyset `(creado_en, id)` con `LIMIT` acotado, no `OFFSET` profundo.
-- **Nombres:** el ejemplo usa español para el dominio (`nombre`, `estado`, `creado_en`) y términos técnicos consolidados (`org_id`, `period_start`, `dedupe_key`). Elige una convención y respétala en todas las tablas; no mezcles `estado` y `status` para lo mismo.
+- Para cambios aditivos (columnas, índices) usa migraciones; para transformaciones de datos, migraciones con lógica o scripts `migrate-*.js` que usen los modelos.
+- `CREATE INDEX CONCURRENTLY` no puede ir en la transacción de la migración: ejecútalo con `qi.sequelize.query('CREATE INDEX CONCURRENTLY ...', { transaction: null })` o en un script aparte.
+- En producción, corre `npx sequelize-cli db:migrate` en el despliegue; en desarrollo puede ejecutarse al arrancar si `NODE_ENV !== 'production'`.
+
+### `resetSchema()` y semillas
+
+`resetSchema()` mantiene la guardia de base `*_test`. Las semillas son idempotentes por clave única (`findOrCreate`), no “si la tabla está vacía”.
+
+```js
+// seeders/organizations.js
+await Organization.findOrCreate({ where: { nombre: 'Demo' }, defaults: { ... } });
+```
+
+### Modelo de ejemplo (multi-tenant)
+
+```js
+// models/Entidad.js (ESM)
+export default (sequelize, DataTypes) => {
+  const Entidad = sequelize.define('Entidad', {
+    id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+    orgId: { type: DataTypes.INTEGER, allowNull: false, field: 'org_id' },
+    nombre: { type: DataTypes.TEXT, allowNull: false },
+    estado: { type: DataTypes.ENUM('activo', 'inactivo'), allowNull: false, defaultValue: 'activo' },
+    creadoEn: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW, field: 'creado_en' },
+    borradoEn: { type: DataTypes.DATE, field: 'borrado_en' },
+  }, {
+    tableName: 'entidades',
+    timestamps: false,
+    defaultScope: { where: { borradoEn: null } },
+  });
+  return Entidad;
+};
+```
+
+- **`ON DELETE RESTRICT`** se declara en la migración (FK), no en el modelo.
+- Indexa `org_id` y las FKs en la migración; Sequelize no los crea automáticamente.
+- Usa `defaultScope` para soft delete (`borrado_en IS NULL`) y `unscoped()` cuando necesites ver borrados.
+- Para dinero usa `DECIMAL(12,2)` (`DataTypes.DECIMAL(12,2)`) o enteros en unidad mínima, nunca `FLOAT`. Para instantes, `DATE` (timestamptz); para días locales de facturación, `DATEONLY`.
+- **Nombres:** elige una convención y respétala; no mezcles `estado` y `status`.
+
+### Consultas y rendimiento
+
+- Evita traer columnas de más: usa `attributes: ['id', 'nombre', ...]`.
+- Paginación por keyset: `where: { creadoEn: { [Op.lt]: cursor } }`, `order: [['creadoEn', 'DESC'], ['id', 'DESC']]`, `limit`.
+- Evita N+1: usa `include` con `required`/`separate` según el caso y mide con `logging`.
+- Para agregaciones pesadas, usa `sequelize.query` con SQL explícito y `replacements`.
+
+### Trampas específicas de Sequelize
+
+- `sequelize.sync({ alter: true })` en producción reescribe tablas y puede perder datos: solo en tests.
+- Inserciones masivas sin transacción: usa `bulkCreate` con `transaction`.
+- Asociaciones sin FKs explícitas pueden crear constraints inesperadas en tests: decláralas en la migración.
+- `paranoid: true` (soft delete de Sequelize) usa `deletedAt`; si el dominio ya usa `borrado_en`, no mezcles ambos: elige uno.
+- `underscored: true` mapea camelCase ↔ snake_case; decide y mantenlo en todos los modelos.
 
 ---
 
@@ -443,7 +457,7 @@ ALTER TABLE memberships
   ADD CONSTRAINT memberships_estado_check CHECK (estado IN ('activa', 'revocada'));
 ```
 
-> Los `ALTER TABLE ... ADD CONSTRAINT` **no son idempotentes**: en `ensureSchema()` comprueba `pg_constraint` o ejecútalos en una migración. `CREATE TABLE IF NOT EXISTS` tampoco añade checks a una tabla que ya existe.
+> Los `ALTER TABLE ... ADD CONSTRAINT` **no son idempotentes**: decláralos en una migración de Sequelize (con `up`/`down`) y no los repitas en el arranque. `CREATE TABLE IF NOT EXISTS` tampoco añade checks a una tabla que ya existe.
 
 > **Decisión de producto:** “una membresía activa por usuario” significa que un usuario no puede pertenecer a dos organizaciones a la vez. Es una limitación consciente y simplifica el tenant; si algún día necesitas multi-organización, elimina ese índice y añade un selector de organización. Documéntalo en la spec.
 
@@ -456,7 +470,7 @@ ALTER TABLE memberships
 | El admin de plataforma no tiene membresía | opera con un `orgId` explícito en la ruta (`/api/admin/orgs/:orgId/...`), no con un query string ambiguo; sin él → `400` |
 | Los datos privados del cliente son 403 para el admin | `requireOrg` en esas rutas; el admin no entra |
 | El cobro es de la organización | `subscriptions.org_id`; solo el `owner` paga |
-| Toda consulta filtra por organización | `WHERE org_id = $1`; los tests de IDOR lo comprueban |
+| Toda consulta filtra por organización | `where: { orgId }`; los tests de IDOR lo comprueban |
 | Los ids ajenos no revelan existencia | `404` en lugar de `403` cuando el recurso es de otra organización |
 | El acceso del admin se audita | fila en `audit_log` con `actor`, `org_id`, acción y motivo |
 
@@ -468,11 +482,11 @@ ALTER TABLE memberships
 ### Alta de una cuenta (transacción única)
 
 ```js
-await withTransaction(async (client) => {
-  const user = await insertUser(client, { email, name, passHash });
-  const org = await insertOrganization(client, { name, billingEmail: email });
-  await insertMembership(client, { orgId: org.id, userId: user.id, role: 'owner' });
-  await insertTrialSubscription(client, { orgId: org.id, userId: user.id, days: 14 });
+await withTransaction(async (t) => {
+  const user = await User.create({ email, name, passHash }, { transaction: t });
+  const org = await Organization.create({ name, billingEmail: email }, { transaction: t });
+  await Membership.create({ orgId: org.id, userId: user.id, role: 'owner' }, { transaction: t });
+  await Subscription.create({ orgId: org.id, userId: user.id, days: 14 }, { transaction: t });
 });
 ```
 
@@ -509,8 +523,8 @@ La precedencia recomendada es: **org → plataforma → entorno → valor por de
 1. **Expand**: crear `organizations`/`memberships` y añadir `org_id` (nullable) a todas las tablas de negocio.
 2. **Preflight**: contar filas y **detectar filas de negocio creadas por el admin** (o por usuarios sin organización). Si hay, la migración **aborta** y exige un mapeo explícito — nunca se inventa una organización.
 3. **Backfill** (idempotente): una organización por cliente sin membresía (el nombre de su recurso principal, si existe, da contexto) + membresía `owner` + fila de suscripción si falta; y `UPDATE ... SET org_id = ...` por la membresía activa de cada usuario.
-4. **Contract**: `ALTER TABLE ... ALTER COLUMN org_id SET NOT NULL`, índices únicos por organización y reemplazo de `user_id` por `org_id` en las consultas.
-5. **Script CLI** con `--dry-run` (preflight, no escribe) y `--apply`, más backup `pg_dump` documentado.
+4. **Contract**: `ALTER TABLE ... ALTER COLUMN org_id SET NOT NULL`, índices únicos por organización y reemplazo de `user_id` por `org_id` en modelos y consultas.
+5. **Migración de Sequelize** o script CLI con `--dry-run` (preflight, no escribe) y `--apply`, más backup `pg_dump` documentado.
 
 **Orden de despliegue seguro** (no lo saltes):
 
@@ -566,6 +580,8 @@ CREATE TABLE IF NOT EXISTS org_settings (
 
 ```js
 // Cifrado: el tag es obligatorio para verificar integridad.
+// KDF: si SETTINGS_SECRET es una frase, deriva con scrypt/HKDF (sal + parámetros versionados).
+// Aquí se asume una clave aleatoria de 32+ bytes; SHA-256 es aceptable en ese caso.
 const key = crypto.createHash('sha256').update(settingsSecret).digest();
 const iv = crypto.randomBytes(12);
 const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
@@ -587,7 +603,7 @@ const valor = Buffer.concat([
 ```
 
 - **KDF:** si `SETTINGS_SECRET` es una frase, no uses SHA-256 directo. Usa `scrypt`/`HKDF` con sal y parámetros versionados. Si es una clave aleatoria de 32+ bytes, SHA-256 es aceptable, pero decláralo.
-- **Rotación:** el prefijo `v1` permite migrar a `v2`; guarda la versión, descifra con la clave vieja y re-cifra con la nueva en un script controlado. No cambies `SETTINGS_SECRET` sin plan de rotación.
+- **Rotación:** el prefijo `v1` permite migrar a `v2`; guarda la versión, descifra con la clave vieja y re-cifra con la nueva en un script controlado. Plan mínimo: (1) backup de `platform_settings`/`org_settings`, (2) `--dry-run` que lista filas a re-cifrar y detecta versiones desconocidas, (3) `--apply` en una transacción con advisory lock, (4) verificar que todas las filas quedan en `v2`, (5) recién entonces cambiar `SETTINGS_SECRET`. No cambies `SETTINGS_SECRET` sin plan de rotación.
 - **Nunca** loguees valores descifrados, cookies, cabeceras `Authorization` ni cuerpos con contraseñas. La pista se calcula al vuelo; no se guarda.
 - Cada integración expone cuatro operaciones: `view()` (configuración + origen + pista), `save()`, `test()` (probar sin enviar nada) y `bridgeConfig()`. `test()` no debe mutar datos ni enviar mensajes reales.
 - Valida la longitud y el formato de claves y valores; una clave arbitraria del cliente no debe romper el panel ni permitir inyección.
@@ -680,7 +696,7 @@ export function startReminderJob() {
 - Si algún día corres más de una instancia, protege el barrido con `pg_try_advisory_lock` o procesa la outbox con `FOR UPDATE SKIP LOCKED`. El `setInterval` no es un coordinador distribuido.
 - **Zona horaria:** guarda instantes en `timestamptz` y calcula los días locales con la zona de la organización. No compares fechas como strings.
 - **Pruebas de N días exactos:** usa horas absolutas (`make_interval(hours => n * 24)`) para que un cambio de hora no alargue el periodo. **Ciclos mensuales:** usa aritmética de calendario (`+ interval '1 month'`) para facturar el mismo día; no generalices la regla de las horas.
-- **Apagado ordenado:** en `SIGTERM`/`SIGINT`, deja de aceptar peticiones, para los timers, espera el barrido en curso y cierra el pool. Un `unref()` no garantiza que el job termine.
+- **Apagado ordenado:** en `SIGTERM`/`SIGINT`, deja de aceptar peticiones, para los timers, espera el barrido en curso y cierra la conexión de Sequelize (`closeDb()`). Un `unref()` no garantiza que el job termine.
 - Registra duración, filas procesadas y errores por job; un job silencioso que falla todas las noches es peor que no tenerlo.
 
 ---
@@ -745,18 +761,19 @@ export default defineConfig({
       },
     }),
   ],
-  resolve: { alias: { '@': path.resolve(__dirname, './src') } },
+  resolve: { alias: { '@': path.resolve(import.meta.dirname, './src') } },
   server: { port: 40300, host: true, proxy: { '/api': 'http://localhost:40400' } },
   build: {
     outDir: 'dist',
-    rollupOptions: {
+    rolldownOptions: {
       output: {
-        manualChunks(id) {
-          if (!id.includes('node_modules')) return undefined;
-          if (id.includes('lucide')) return 'icons';
-          if (id.includes('@base-ui')) return 'ui';
-          if (id.includes('react')) return 'react';
-          return 'vendor';
+        codeSplitting: {
+          groups: [
+            { name: 'icons', test: /node_modules[\\/]lucide/ },
+            { name: 'ui', test: /node_modules[\\/]@base-ui/ },
+            { name: 'react', test: /node_modules[\\/](react|react-dom|react-router)/ },
+            { name: 'vendor', test: /node_modules/ },
+          ],
         },
       },
     },
@@ -764,7 +781,8 @@ export default defineConfig({
 });
 ```
 
-- `manualChunks` no debe mandar todo `node_modules` a un único chunk enorme; separa `react`, `ui`, `icons` y deja un `vendor` razonable.
+- `codeSplitting.groups` no debe mandar todo `node_modules` a un único chunk enorme; separa `react`, `ui`, `icons` y deja un `vendor` razonable.
+- Vite 8 usa **Rolldown** en lugar de Rollup: `build.rollupOptions` pasa a `build.rolldownOptions` y `manualChunks` (forma objeto) ya no existe; usa `codeSplitting.groups`.
 - En producción, Express sirve `client/dist` **después** de las rutas `/api`. En Express 5, `app.get('*')` ya no es válido: usa `app.get('/{*splat}', ...)` o un middleware final.
 
 ```js
@@ -777,7 +795,10 @@ app.use('/assets', express.static(path.join(dist, 'assets'), {
   maxAge: '1y',
 }));
 app.use(express.static(dist, { index: false, maxAge: 0 }));
-app.get('/{*splat}', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
+app.get('/{*splat}', (_req, res) => {
+  res.set('Cache-Control', 'no-cache');
+  res.sendFile(path.join(dist, 'index.html'));
+});
 ```
 
 - Assets con hash → caché inmutable. `index.html` → sin caché, para que un despliegue se vea. Las rutas `/api` desconocidas responden JSON 404, no el HTML de la SPA.
@@ -885,17 +906,181 @@ export function useResource(loader) {
 - Los loaders deben aceptar `{ signal }` y pasarlo a `requestJson`; si no, la cancelación no llega al `fetch` y la petición anterior sigue viva.
 - Si el loader depende de parámetros de ruta, llama a `reload()` desde un `useEffect` con esas dependencias; el hook no adivina cuándo cambió el loader.
 - `context/AuthContext.jsx`: sesión global (`undefined` = comprobando, `null` = sin sesión, objeto = usuario). El usuario expone `id`, `email`, `name`, `role` (plataforma), `orgId`, `orgName` y `membershipRole` (dentro de la organización). Si `ApiError.status === 401`, limpia la sesión y redirige al login; no dejes la UI en un estado zombie.
-- `context/ToastContext.jsx`: puente sobre `Toast` de Base UI con `push({ title, description, variant })` (`success`/`error`/`info`).
+- `context/ToastContext.jsx`: puente **fino** sobre Base UI Toast. Dentro del árbol usa `Toast.useToastManager()`; fuera de React, `Toast.createToastManager()` pasado a `<Toast.Provider toastManager={...}>`. La API oficial es `add({ title, description, type })` —`type` es un string; por convención `success`/`error`/`info`—, **no** `push` ni `variant`. El contexto puede exponer `toast.success(title, description)` como azúcar que llama a `add({ title, description, type: 'success' })`. Si no necesitas esa azúcar, elimina el contexto y usa el manager directo: no reimplementes la cola, los timeouts ni el estado de los toasts.
 - `components/ErrorBoundary.jsx`: captura errores de render y muestra una pantalla de recuperación; no dejes la app en blanco.
 - `components/layout/`: `PublicLayout` (público) y `PrivateLayout` (sidebar + cabecera + `Outlet`), con navegación filtrada por rol.
 - `App.jsx`: tabla de rutas por rol; las rutas privadas sin sesión redirigen al login. **Los guards del cliente son UX**: el servidor vuelve a comprobar todo.
-- **Formularios**: 2–3 columnas con `Field` + `FieldLabel` + `FieldControl`; `Select` de Base UI para catálogos; `Input` nativo para texto y fecha. Deshabilita el botón mientras envía y muestra el error del servidor junto al campo.
+- **Formularios**: 2–3 columnas con la anatomía oficial `Field.Root` + `Field.Label` + `Field.Control` + `Field.Description` + `Field.Error`; `Select` de Base UI para catálogos (o `Combobox` si la lista es grande); `Field.Control` nativo para texto y fecha. Deshabilita el botón mientras envía y muestra el error del servidor con `invalid` en `Field.Root` y `Field.Error match={true}`.
 - **Avisos**: toast en cada acción (éxito y error con el mensaje del servidor).
 - **Estados**: toda pantalla que carga datos debe tener `loading`, `empty`, `error` y `success`; no muestres una tabla vacía mientras carga.
-- **Dos puertas**: una landing pública que explica el servicio sin exponer datos internos, y el panel privado con resumen, listados filtrables, descargas y confirmaciones (`AlertDialog`).
+- **Dos puertas**: una landing pública que explica el servicio sin exponer datos internos, y el panel privado con resumen, listados filtrables, descargas y confirmaciones con la anatomía oficial de `AlertDialog` (`Root` → `Trigger` → `Portal` → `Backdrop` → `Popup` → `Title`/`Description`/`Close`).
 - **Seguridad en el cliente:** no guardes tokens en `localStorage` (usa cookie `HttpOnly`); no confíes en `returnTo` sin validarlo; no renderices HTML de usuario sin sanitizar.
 
-### 12.3 Kit de componentes propio (`client/src/components/ui/`)
+### 12.3 Base UI: reglas de uso y kit propio (`client/src/components/ui/`)
+
+Base UI **no es Radix**: no tiene `asChild`, no usa `ToastContext.push`, no existen `FieldLabel` ni `FieldControl`, y los nombres de los subcomponentes son los que publica su documentación. La documentación oficial es la fuente de verdad; si contradice la memoria del modelo o un ejemplo de un blog, gana la documentación. Antes de usar un componente, consulta su página en Markdown (por ejemplo, `https://base-ui.com/react/components/select.md`) o el índice `https://base-ui.com/llms.txt`.
+
+**Paquete e imports**
+
+```bash
+npm i @base-ui/react
+```
+
+```js
+import { Button } from '@base-ui/react/button';
+import { Field } from '@base-ui/react/field';
+import { Select } from '@base-ui/react/select';
+import { AlertDialog } from '@base-ui/react/alert-dialog';
+import { Toast } from '@base-ui/react/toast';
+```
+
+- El paquete es `@base-ui/react`. `@base-ui-components/react` es el nombre antiguo y **no** debe aparecer en el código.
+- Importa por subruta (`@base-ui/react/select`), como hace la documentación; así el bundle solo incluye lo que usas y no dependes del barrel raíz.
+- Base UI es *headless*: no trae estilos; el diseño vive en el kit propio con Tailwind.
+
+**Anatomía oficial**
+
+```jsx
+// Formularios: el control puede ser Field.Control u otro input de Base UI
+<Field.Root name="email" invalid={Boolean(error)}>
+  <Field.Label>Correo</Field.Label>
+  <Field.Control type="email" required />
+  <Field.Description>Solo lo usamos para avisos de cuenta.</Field.Description>
+  <Field.Error match="valueMissing">Escribe tu correo.</Field.Error>
+  {error && <Field.Error match={true}>{error}</Field.Error>}
+</Field.Root>
+```
+
+```jsx
+// Select: Label + Trigger + Value + Icon + Portal + Positioner + Popup + List
+<Select.Root
+  name="orgId"
+  items={orgs.map((org) => ({ value: org.id, label: org.name }))}
+  value={orgId}
+  onValueChange={setOrgId}
+>
+  <Select.Label>Organización</Select.Label>
+  <Select.Trigger>
+    <Select.Value placeholder="Elige una organización" />
+    <Select.Icon><ChevronUpDownIcon /></Select.Icon>
+  </Select.Trigger>
+  <Select.Portal>
+    <Select.Positioner sideOffset={4}>
+      <Select.Popup>
+        <Select.List>
+          {orgs.map((org) => (
+            <Select.Item key={org.id} value={org.id}>
+              <Select.ItemIndicator><CheckIcon /></Select.ItemIndicator>
+              <Select.ItemText>{org.name}</Select.ItemText>
+            </Select.Item>
+          ))}
+        </Select.List>
+      </Select.Popup>
+    </Select.Positioner>
+  </Select.Portal>
+</Select.Root>
+```
+
+```jsx
+// AlertDialog: solo para acciones destructivas o que exigen respuesta
+<AlertDialog.Root>
+  <AlertDialog.Trigger render={<Button variant="destructive" />}>
+    Eliminar factura
+  </AlertDialog.Trigger>
+  <AlertDialog.Portal>
+    <AlertDialog.Backdrop />
+    <AlertDialog.Popup>
+      <AlertDialog.Title>¿Eliminar la factura?</AlertDialog.Title>
+      <AlertDialog.Description>Esta acción no se puede deshacer.</AlertDialog.Description>
+      <AlertDialog.Close render={<Button variant="secondary" />}>Cancelar</AlertDialog.Close>
+      <AlertDialog.Close render={<Button variant="destructive" />} onClick={onDelete}>
+        Eliminar
+      </AlertDialog.Close>
+    </AlertDialog.Popup>
+  </AlertDialog.Portal>
+</AlertDialog.Root>
+```
+
+`AlertDialog.Viewport` es opcional: aparece en la anatomía de la documentación y se usa cuando el popup debe poder hacer scroll. `AlertDialog.Close` puede envolver tu propio botón con `render`, como en el ejemplo.
+
+```jsx
+// Toast: Provider > Portal > Viewport > Root(toast) > Content > Title/Description/Close
+<Toast.Provider>
+  <App />
+  <Toast.Portal>
+    <Toast.Viewport>
+      <ToastList />
+    </Toast.Viewport>
+  </Toast.Portal>
+</Toast.Provider>
+
+function ToastList() {
+  const { toasts } = Toast.useToastManager();
+  return toasts.map((toast) => (
+    <Toast.Root key={toast.id} toast={toast}>
+      <Toast.Content>
+        <Toast.Title />
+        <Toast.Description />
+        <Toast.Close>Descartar</Toast.Close>
+      </Toast.Content>
+    </Toast.Root>
+  ));
+}
+```
+
+- `Toast.Root` **exige** `toast={toast}`. `Toast.Title` y `Toast.Description` leen el contenido del toast; no los rellenes a mano.
+- Para lanzar un toast: `toastManager.add({ title, description, type: 'success' })`. El método es `add` y la propiedad es `type` (un string; por convención `success`/`error`/`info`), no `push`/`variant`. También existen `close`, `update` y `promise`.
+- Usa `Toast.useToastManager()` dentro del árbol y `Toast.createToastManager()` para lanzar toasts desde fuera de React; pásalo como `<Toast.Provider toastManager={...}>`.
+- El estado del toast se expone con `data-type`, `data-expanded`, `data-limited`, `data-behind`, `data-starting-style` y `data-ending-style`; estílalos con Tailwind en vez de recrear la animación a mano.
+
+**Composición con `render`**
+
+```jsx
+<Button render={<Link to="/facturas" />}>Facturas</Button>
+<Select.Trigger render={<Button variant="secondary" />} />
+```
+
+`render` sustituye el elemento y fusiona props; es la vía oficial para componer con `Link`, triggers y botones del kit. El componente que pongas en `render` debe reenviar `ref` y esparcir las props que recibe en su nodo DOM. **No existe `asChild`**; si copias un ejemplo de Radix, no compila o rompe la semántica.
+
+**Formularios y validación**
+
+- `Field.Root` agrupa etiqueta, control, descripción y error; `Field.Label` se asocia solo al control y `Field.Error` se enlaza con `aria-describedby`.
+- Para errores del servidor: `invalid` en `Field.Root` y `<Field.Error match={true}>`; para validación nativa, usa `match="valueMissing"`, `"typeMismatch"`, etc.
+- `Field.Control` puede omitirse si usas `Select`, `Checkbox`, `Combobox` u otro input de Base UI: Field los reconoce.
+- No escribas `aria-describedby` a mano si Field ya lo gestiona; duplicarlo confunde a lectores de pantalla.
+
+**Select, AlertDialog y Toast: límites**
+
+- `Select` no filtra; para listas grandes usa `Combobox`. `Select.Label` es la etiqueta accesible; si no hay etiqueta visible, pasa `aria-label` al `Select.Trigger`.
+- `AlertDialog` no es un modal genérico: úsalo para confirmaciones destructivas o decisiones que exigen respuesta. Para formularios y contenido normal, usa `Dialog`.
+- Un toast no sustituye un error de campo ni un mensaje crítico: si el usuario debe actuar, usa `AlertDialog` o un error inline.
+
+**Estilos y portales**
+
+- Estiliza con los atributos de estado documentados (`data-pressed`, `data-invalid`, `data-highlighted`, `data-disabled`, `data-placeholder`, `data-side`, `data-starting-style`, `data-ending-style`…) y con `className` como función `(state) => ...` si necesitas lógica.
+- Los popups van en un portal: envuelve la app en un contenedor con `isolation: isolate` para que los `z-index` de la página no los tapen.
+- Para iOS 26+ Safari, añade `body { position: relative; }`; los backdrops de los diálogos lo necesitan para cubrir el viewport visual.
+- No parchees los estilos internos de Base UI con `!important` ni dependas de clases generadas: usa la API pública y los `data-*`.
+
+**Prohibiciones (rompen la guía)**
+
+| Incorrecto | Correcto |
+|---|---|
+| `@base-ui-components/react` | `@base-ui/react` |
+| `<Button asChild>` | `<Button render={<Link />}>` |
+| `toastManager.push({ variant })` | `toastManager.add({ type })` |
+| `<FieldLabel>` / `<FieldControl>` | `<Field.Label>` / `<Field.Control>` |
+| `<AlertDialog>` genérico | `AlertDialog.Root` + `Trigger` + `Portal` + `Backdrop` + `Popup` + `Title` + `Description` + `Close` |
+| `<Select>` genérico | `Select.Root` + `Label` + `Trigger` + `Value` + `Icon` + `Portal` + `Positioner` + `Popup` + `List` + `Item` + `ItemText` + `ItemIndicator` |
+| `Toast.Root` sin `toast` | `<Toast.Root toast={toast}>` |
+
+**Versionado**
+
+- Fija `@base-ui/react` con `^1.9` y el `package-lock.json`; comprueba la versión publicada con `npm view @base-ui/react version`.
+- Al actualizar, revisa las notas de release y vuelve a leer la página del componente que uses: los nombres y la anatomía pueden cambiar entre versiones menores.
+- Si un ejemplo del repositorio y la documentación oficial discrepan, corrige el ejemplo; no adaptes la documentación al código.
+
+**Kit propio**
 
 Envoltorios finos sobre Base UI + `class-variance-authority`:
 
@@ -904,7 +1089,7 @@ ui/button.jsx      ui/card.jsx       ui/badge.jsx       ui/input.jsx
 ui/select.jsx      ui/field.jsx      ui/alert-dialog.jsx   ui/progress.jsx
 ```
 
-Convenciones: `variant` (`default`/`secondary`/`ghost`/`destructive`/`link`), `size` (`default`/`sm`/`xs`/`icon-sm`…), `className` con `cn()` (clsx + tailwind-merge) y `render={<Button .../>}` para componer con `Link` o triggers de Base UI.
+Convenciones: `variant` (`default`/`secondary`/`ghost`/`destructive`/`link`), `size` (`default`/`sm`/`xs`/`icon-sm`…), `className` con `cn()` (clsx + tailwind-merge) y `render={<Button .../>}` para componer con `Link` o triggers de Base UI. El kit puede simplificar la API, pero **no puede cambiar la anatomía ni la semántica de Base UI**.
 
 ### 12.4 Accesibilidad y responsive
 
@@ -927,7 +1112,7 @@ El grueso se prueba en la API, pero el flujo crítico (alta → operación → c
 
 ### 13.1 Entorno y base de test
 
-No confíes en asignar `process.env` después de los `import`: en ESM los imports estáticos se evalúan **antes** del cuerpo del módulo. Hoy funciona por el pool perezoso, pero si alguien lo hace *eager* las pruebas pueden caer en la base de desarrollo. Usa `--env-file` o un módulo de setup importado primero:
+No confíes en asignar `process.env` después de los `import`: en ESM los imports estáticos se evalúan **antes** del cuerpo del módulo y la instancia de Sequelize lee `DATABASE_URL` al construirse. Si se inicializa *eager*, las pruebas pueden caer en la base de desarrollo. Usa `--env-file` o un módulo de setup importado primero:
 
 ```json
 "test": "node --env-file=.env.test --test --test-concurrency=1"
@@ -954,12 +1139,13 @@ if (!dbName.endsWith('_test')) {
 ```
 
 - `resetSchema()` borra el **esquema**, no la base. Crea la base `app_test` una vez (`createdb`) y deja que el test limpie el esquema.
-- Un archivo de test, una API real: `before` levanta la app en puerto aleatorio (`listen(0)`) y `after` cierra servidor y pool.
+- En tests, `createApp()` puede ejecutar `sequelize.sync()` (sin `alter`) sobre la base `_test` tras `resetSchema()`; en producción nunca se usa `sync()`.
+- Un archivo de test, una API real: `before` levanta la app en puerto aleatorio (`listen(0)`) y `after` cierra el servidor y la conexión de Sequelize.
 
 ```js
 import { before, after } from 'node:test';
 import { createApp } from '../src/app.js';
-import { resetSchema, closePool } from '../src/db/index.js';
+import { resetSchema, closeDb } from '../src/db/index.js';
 
 let server;
 let baseUrl;
@@ -971,12 +1157,13 @@ before(async () => {
 });
 
 after(async () => {
+  server.closeAllConnections?.();          // evita cuelgues por keep-alive
   await new Promise((resolve) => server.close(resolve));
-  await closePool();
+  await closeDb();
 });
 ```
 
-- En Node 20, `server.close()` cierra las conexiones idle; si usas una versión anterior, añade `server.closeAllConnections()` para no colgar el proceso.
+- En Node 20, `server.close()` cierra las conexiones idle, pero las keep-alive pueden colgar el proceso: llama a `server.closeAllConnections()` antes de cerrar. En versiones anteriores es obligatorio.
 - Nombra los archivos `*.test.js` o pasa un glob explícito: el descubrimiento por defecto de `node --test` no es infinito.
 - Si los archivos comparten base, `--test-concurrency=1`; si cada uno usa una base propia, puedes paralelizar.
 
@@ -1046,7 +1233,7 @@ Los guards del cliente, el diseño responsive y la accesibilidad necesitan revis
 
 ---
 
-## 14. Método de trabajo (ODD + SDD + BDD + TDD)
+## 14. Método de trabajo (ODD + SDD + BDD + TDD + RDD)
 
 Es lo que hace que el proyecto sea mantenible en el tiempo; vale la pena adoptarlo desde el principio.
 
@@ -1056,19 +1243,114 @@ Es lo que hace que el proyecto sea mantenible en el tiempo; vale la pena adoptar
 | **SDD** — Spec-Driven Development | ¿Qué debe hacer exactamente y cómo sabremos que está bien? | spec con reglas `S#`, criterios `AC#`, contratos | `specs/<feature>.md` |
 | **BDD** — Behavior-Driven Development | ¿Cómo se comporta el sistema visto desde el negocio? | escenarios Gherkin en español con `@s#` | `features/<feature>.feature` |
 | **TDD** — Test-Driven Development | ¿Cómo lo construimos sin romper lo existente? | tareas `T#`, rojo → verde → refactor, evidencia | `plans/<feature>.md` |
+| **RDD** — Receipt-Driven Development (opcional) | ¿La tarea revisada es exactamente la que se entrega y con qué evidencia? | recibo JSON del candidato congelado, checks, hallazgos y veredicto | `receipts/<tarea>.json` |
 
 ### Ciclo obligatorio de cada pedido
 
 1. **Autorizar** — investigar o explicar no autoriza cambios de código.
 2. **Explorar** el código y los requisitos antes de escribir.
 3. **Clasificar**:
-   - *Chico* (entendido, riesgo contenido, reanudable con el pedido + `git diff`): se hace directo, sin documentos.
-   - *Grande* (dinero, cumplimiento, datos personales, autenticación, suscripciones, migraciones de esquema, integraciones externas): **tres artefactos antes del primer cambio de código** (spec + plan + escenarios) y revisión de seguridad.
+   - *Chico* (entendido, riesgo contenido, reanudable con el pedido + `git diff`): se hace directo, sin spec/plan/escenarios; el recibo RDD se decide según el riesgo.
+   - *Grande* (dinero, cumplimiento, datos personales, autenticación, suscripciones, migraciones de esquema, integraciones externas): **tres artefactos antes del primer cambio de código** (spec + plan + escenarios), revisión de seguridad y **recibo RDD al cerrar**.
 4. **Especificar (SDD)**: la spec cita el pedido literal, declara el impacto de negocio (cobranza · conversión · retención · cumplimiento) y define reglas `S#` con criterios de aceptación. Incluye requisitos no funcionales: seguridad, privacidad, accesibilidad, rendimiento y retención.
 5. **Acordar comportamiento (BDD)**: un escenario Gherkin por regla, etiquetado `@s#`, en lenguaje de negocio, sin SQL ni detalles internos.
 6. **Implementar (TDD)**: una prueba por regla pedida y una de regresión por cada comportamiento existente que se toque; rojo → verde → refactor.
 7. **Cerrar con evidencia**: tests, build, verificación del flujo real, migración probada y, si aplica, restauración de backup. Una tarea sin evidencia **no** se marca hecha; los fallos y pendientes se reportan tal cual.
-8. **Actualizar documentos**: spec, plan, `README.md` y `AGENTS.md` si cambió una convención.
+8. **Revisar y emitir recibo (RDD)**: si RDD está activo, congela el candidato, revisa con las lentes que correspondan, ejecuta los checks y escribe `receipts/<tarea>.json`. Sin `verdict: "approved"` la tarea **no** se cierra.
+9. **Actualizar documentos**: spec, plan, `README.md` y `AGENTS.md` si cambió una convención.
+
+### 14.1 RDD: recibo por tarea (`receipts/<tarea>.json`)
+
+RDD es una capa **opcional** de revisión y evidencia. Cuando se adopta, **cada tarea `T#` termina con un recibo**; se recomienda activarlo siempre en tareas de dinero, autenticación, datos personales, migraciones e integraciones externas. El recibo no sustituye los tests ni el code review: los complementa con una foto inmutable de lo revisado.
+
+El flujo es:
+
+1. **Congelar el candidato**: commit base, commit revisado, worktree y hash del diff. Nada cambia durante la revisión.
+2. **Clasificar el riesgo**: `low` (lectura estructural, sin lentes), `medium` (una lente de foco) o `high` (4R: `risk`, `resilience`, `readability`, `reliability`).
+3. **Revisar y ejecutar checks**: tests, build, smoke y seguridad. Se registra el comando, el `exit_code` y un resumen; la salida completa va a CI o a un log referenciado, nunca dentro del JSON si puede contener secretos o PII.
+4. **Corregir una sola vez**: si hay hallazgos bloqueantes, se permite **un** intento acotado; después se vuelve a validar. Si no pasa, el veredicto es `rejected` o `inconclusive`.
+5. **Emitir el recibo**: se escribe `receipts/<tarea>.json` y solo un `verdict: "approved"` permite cerrar la tarea.
+
+```json
+{
+  "task": "T3",
+  "feature": "facturacion",
+  "created_at": "2026-10-28T14:32:00Z",
+  "candidate": {
+    "base_commit": "9f1c2a7",
+    "head_commit": "4b8d0e1",
+    "worktree": "/workspaces/app",
+    "diff_sha256": "sha256:6f1c2a..."
+  },
+  "scope": {
+    "files": [
+      "server/src/services/invoices.js",
+      "server/test/invoices.test.js"
+    ]
+  },
+  "risk": "high",
+  "lenses": ["risk", "resilience", "readability", "reliability"],
+  "checks": [
+    {
+      "name": "tests",
+      "command": "npm test",
+      "cwd": "server",
+      "exit_code": 0,
+      "summary": "42 passed, 0 failed",
+      "evidence": "https://ci.example.com/runs/1842"
+    },
+    {
+      "name": "build",
+      "command": "npm run build",
+      "cwd": ".",
+      "exit_code": 0,
+      "summary": "ok",
+      "evidence": "https://ci.example.com/runs/1842/build"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "high",
+      "blocking": true,
+      "file": "server/src/services/invoices.js",
+      "line": 42,
+      "message": "La emisión no es idempotente",
+      "status": "fixed"
+    }
+  ],
+  "correction": {
+    "attempts": 1,
+    "max_attempts": 1,
+    "result": "passed"
+  },
+  "verdict": "approved",
+  "limitations": [
+    "No se probó el webhook real de Stripe; se usó el modo simulado."
+  ],
+  "author": { "agent": "opencode", "model": "..." },
+  "reviewer": { "agent": "reviewer", "model": "..." }
+}
+```
+
+Campos que no pueden faltar:
+
+- `candidate`: identidad exacta de lo revisado. `base_commit` y `head_commit` delimitan el candidato; si la revisión es previa al commit, `head_commit` coincide con `base_commit` y el diff vive en el worktree. `diff_sha256` es la huella; si el diff cambia, el recibo deja de valer y se regenera.
+- `scope.files`: archivos revisados. El commit solo puede tocar esos archivos **más el propio recibo**; si aparece otro, se revisa y se emite un recibo nuevo.
+- `risk` y `lenses`: dejan explícito qué nivel de revisión se aplicó. En `low`, `lenses` puede ser `[]`; en `high`, las 4R.
+- `checks`: comandos realmente ejecutados. `evidence` apunta a CI o a un log; no pegues salidas enormes ni secretos.
+- `findings`: solo hallazgos causados por el candidato. `blocking: true` para `critical`/`high`; `status`: `fixed`, `open` o `accepted`.
+- `correction`: como máximo `attempts: 1` con `max_attempts: 1`; `result` es `not-needed`, `passed` o `failed`. Un bucle de correcciones invalida el recibo.
+- `verdict`: `approved`, `rejected` o `inconclusive`. Solo `approved` cierra la tarea.
+- `limitations`: lo que no se probó o quedó fuera de alcance. Un array vacío es una afirmación fuerte: úsalo solo si de verdad no hay limitaciones.
+- `author` y `reviewer`: contextos distintos; idealmente agentes o modelos distintos. El autor no firma su propia revisión.
+
+Reglas de convivencia:
+
+- `<tarea>` es el ID de la tarea del plan (`T3`). Si varias features repiten `T1`, usa `receipts/facturacion-T1.json` y mantén el mismo ID en el plan.
+- El recibo se versiona en Git junto al código y es **inmutable** una vez aprobado. Si cambia el candidato, se regenera; no se edita el veredicto.
+- El recibo es **evidencia**, no autorización de entrega: commit, push, PR y despliegue siguen las reglas del repositorio y la revisión humana.
+- No guardes secretos, tokens ni PII en `receipts/`. Si un check los produce, guarda solo el hash o una versión redactada.
+- Usa fechas ISO 8601 en UTC y SHA-256 para las huellas.
 
 ### Definition of Done
 
@@ -1076,6 +1358,7 @@ Una feature no está terminada hasta que:
 
 - [ ] `npm test` en verde y `npm run build` correcto.
 - [ ] El flujo real se verificó (smoke) y quedó registrado en el plan.
+- [ ] Si RDD está activo: `receipts/<tarea>.json` tiene `verdict: "approved"`, el diff coincide con el candidato revisado y no quedan hallazgos bloqueantes abiertos.
 - [ ] Las reglas `S#` tienen su escenario `@s#` y su prueba.
 - [ ] Los casos de error (401/403/404/409/429) están cubiertos.
 - [ ] No hay secretos, tokens ni PII en logs ni en el repositorio.
@@ -1089,9 +1372,9 @@ Una feature no está terminada hasta que:
 
 - **Todo en español**: interfaz, mensajes de error, documentos y commits (Conventional Commit en español: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`).
 - **Commits pequeños** (≈400 líneas) y revisables; cada tarea registra su commit en el plan.
-- Los artefactos del método viven **solo** en `/specs`, `/plans` y `/features`; no se crean otros directorios de método.
+- Los artefactos del método viven **solo** en `/specs`, `/plans`, `/features` y `/receipts`; no se crean otros directorios de método.
 - Cada documento lleva un `## Log` con entradas `L1`, `L2`… y `L1` conserva el **pedido literal**, sin parafrasear.
-- Reglas y pruebas se trazan entre sí: `S#` (spec) ↔ `@s#` (escenario) ↔ `T#` (tarea) ↔ nombre de la prueba.
+- Reglas y pruebas se trazan entre sí: `S#` (spec) ↔ `@s#` (escenario) ↔ `T#` (tarea) ↔ nombre de la prueba ↔ `receipts/<tarea>.json`.
 - Las decisiones y trade-offs (por ejemplo, “una organización por usuario”) se anotan en la spec; no se dejan solo en la cabeza.
 
 ---
@@ -1148,13 +1431,13 @@ Antes de escribir la primera tabla, responde estas preguntas:
 | FK sin índice | listados y borrados lentos | índice en cada FK, además de `org_id` |
 | `actualizado_en` “se actualiza solo” | la fecha miente | trigger `BEFORE UPDATE` o convención obligatoria |
 | `CREATE INDEX CONCURRENTLY` dentro de transacción | error de PostgreSQL | ejecutarlo **fuera** de la transacción |
-| Dos arranques ejecutan DDL a la vez | deadlock o error de catálogo | `pg_advisory_xact_lock` alrededor de `ensureSchema()` |
+| Dos despliegues ejecutan migraciones a la vez | deadlock o error de catálogo | `pg_advisory_xact_lock` al inicio de la migración |
 | `SELECT *` | rompe al añadir columnas y trae datos de más | columnas explícitas |
 | `OFFSET` profundo | páginas lentas y saltos | keyset `(creado_en, id)` + `LIMIT` acotado |
 | `UNIQUE` con `NULL` | varias filas “vacías” | índice parcial o `NULLS NOT DISTINCT` (PG 15+; en 14, parcial) |
 | `dedupe_key` global | colisiones entre organizaciones | `UNIQUE (org_id, dedupe_key)` |
 | Factura con `SERIAL` y huecos | incumple numeración legal | contador en tabla con `FOR UPDATE` (las secuencias dejan huecos), o numeración por rango |
-| Pool agotado | peticiones colgadas | `max`, `connectionTimeoutMillis`, `statement_timeout`; no retengas clientes |
+| Pool agotado | peticiones colgadas | `pool.max`, `pool.acquire`, `dialectOptions.statement_timeout`; no retengas transacciones |
 | Llamada HTTP dentro de transacción | locks y conexiones abiertas | outbox: escribe y procesa fuera |
 | `ALTER TABLE` bloqueante | downtime | `CONCURRENTLY`/`NOT VALID` y ventana de mantenimiento |
 
@@ -1202,7 +1485,14 @@ Antes de escribir la primera tabla, responde estas preguntas:
 | PWA cachea `/api` | datos viejos y privados | `navigateFallbackDenylist` y sin runtime cache de API |
 | `autoUpdate` en formulario largo | recarga y pierde datos | `registerType: 'prompt'` |
 | `StrictMode` duplica efectos | doble fetch en desarrollo | abortar en cleanup |
-| `manualChunks` manda todo a un chunk | bundle enorme | separar `react`, `ui`, `icons`, `vendor` |
+| `asChild` de Radix en Base UI | prop ignorada o error | `render={<Componente />}` |
+| `toastManager.push({ variant })` | no se muestra el toast | `add({ type })`; `Toast.Root toast={toast}` |
+| `@base-ui-components/react` | paquete obsoleto | `@base-ui/react` |
+| `FieldLabel` / `FieldControl` | componentes inexistentes | `Field.Label` / `Field.Control` |
+| `build.rollupOptions` en Vite 8 | opción deprecada | renombrar a `build.rolldownOptions` |
+| `manualChunks` en Vite 8 | objeto no soportado | usar `output.codeSplitting.groups` |
+| `__dirname` en `vite.config.js` ESM | `ReferenceError` | `import.meta.dirname` |
+| `codeSplitting.groups` manda todo a un chunk | bundle enorme | separar `react`, `ui`, `icons`, `vendor` |
 | `app.get('*')` en Express 5 | error de path-to-regexp | `app.get('/{*splat}', ...)` |
 | `index.html` cacheado | despliegue invisible | assets inmutables, HTML `no-cache` |
 | `fetch` sin timeout | spinner eterno | `AbortSignal.timeout()` |
@@ -1239,15 +1529,15 @@ Antes de escribir la primera tabla, responde estas preguntas:
 
 1. `npm init` en la raíz con `workspaces: ["server", "client"]`, `engines`, `type: module` y los scripts de la sección 3.
 2. Crea `.env.example`, `.env.test.example`, `.nvmrc`, `.gitignore` (`.env`, `.env.test`, `node_modules`, `dist`, `*.log`) y el `package-lock.json`.
-3. `server/`: `express`, `helmet`, `pg` (+ `pdfkit` si hay documentos). `client/`: react, react-dom, react-router-dom, tailwind, base-ui, lucide-react, clsx, tailwind-merge, cva.
-4. Copiar `server/src/db/index.js`, `config/env.js`, `lib/password.js`, `lib/crypto.js`, `lib/validate.js`, `lib/cookies.js`, `lib/rate-limit.js`, `middlewares/auth.js`, `middlewares/error.js`, `services/observability.js`.
+3. `server/`: `express`, `helmet`, `sequelize`, `pg` (+ `pdfkit` si hay documentos) y dev `sequelize-cli`. `client/`: react, react-dom, react-router-dom, tailwind, base-ui, lucide-react, clsx, tailwind-merge, cva.
+4. Copiar `server/src/db/index.js`, `models/`, `config/env.js`, `lib/password.js`, `lib/crypto.js`, `lib/validate.js`, `lib/cookies.js`, `lib/rate-limit.js`, `middlewares/auth.js`, `middlewares/error.js`, `services/observability.js`. Inicializar Sequelize CLI (`npx sequelize-cli init`) y configurar `config/config.json` o `.sequelizerc`.
 5. Copiar `client/src/components/ui/*`, `ErrorBoundary.jsx`, `context/ToastContext.jsx`, `hooks/useResource.js`, `api/http.js`, `layout/*` y `App.jsx` como esqueleto.
 6. Escribir `specs/negocio.md` (modelo de negocio, palancas, ciclo del dinero, moneda, impuestos, retención).
 7. Modelar el dominio (sección 15), la matriz de permisos y la primera spec con reglas `S#`.
-8. Escribir los `.feature` y el plan TDD **antes** del código.
+8. Escribir los `.feature` y el plan TDD **antes** del código; crear `receipts/README.md` con el esquema del recibo.
 9. Implementar por tareas con pruebas primero; `npm test` y `npm run build` en verde en cada fase.
 10. Configurar la línea base: rate limit, sesión hasheada, CSRF/Origin, body limit, validación, error handler, `trust proxy`, cabeceras.
-11. Base de datos: índices por `org_id`, FKs, `CHECK`, `actualizado_en`, `resetSchema()` con guardia, `ensureSchema()` con advisory lock.
+11. Base de datos: modelos Sequelize, migraciones versionadas, índices por `org_id`, FKs, `CHECK`, `actualizado_en`, `resetSchema()` con guardia; sin `sync()` en producción.
 12. Jobs: `running`, dedupe por organización, apagado ordenado.
 13. `npm run dev` y verificar el flujo real de punta a punta (alta → operación → cobro → documento).
 14. Documentar el runbook: despliegue, backup, restauración, rotación de secretos y reseteo de admin.
@@ -1256,7 +1546,7 @@ Antes de escribir la primera tabla, responde estas preguntas:
 
 - [ ] `NODE_ENV=production`, `SETTINGS_SECRET` fuerte y `ADMIN_PASSWORD` fuerte/rotada.
 - [ ] TLS + HSTS + `trust proxy` + cookies `Secure`/`HttpOnly`/`SameSite=Lax`.
-- [ ] Rate limit en login/registro/reset y límite de body.
+- [ ] Rate limit en login/registro/reset y límite de body (`express.json({ limit: '100kb' })`).
 - [ ] Validación de entrada y errores genéricos sin stack.
 - [ ] Sesiones hasheadas, rotación al login, revocación y limpieza de expiradas.
 - [ ] Recuperación de contraseña y verificación de correo, si el panel es público.
@@ -1270,7 +1560,8 @@ Antes de escribir la primera tabla, responde estas preguntas:
 - [ ] systemd con `Restart=on-failure`, usuario sin privilegios, `EnvironmentFile` 600.
 - [ ] Logs con rotación/retención y monitorización de disco/DB/uptime.
 - [ ] Smoke del flujo completo y plan de rollback documentado.
-- [ ] `README.md`, `AGENTS.md`, spec y runbook al día.
+- [ ] Recibos RDD de las tareas críticas archivados, con `verdict: "approved"` y evidencia verificable.
+- [ ] `README.md`, `AGENTS.md`, spec, `receipts/README.md` y runbook al día.
 
 ---
 
@@ -1302,6 +1593,8 @@ Antes de escribir la primera tabla, responde estas preguntas:
 | **unidad mínima** | centavos o la unidad entera de la moneda; nunca `float` |
 | **expand / backfill / contract** | fases de una migración segura sobre bases existentes |
 | **RPO / RTO** | pérdida máxima de datos aceptable / tiempo máximo de recuperación |
+| **RDD** | Receipt-Driven Development: revisión de un candidato congelado que produce un recibo verificable antes de cerrar la tarea |
+| **recibo** | JSON de evidencia de una tarea: candidato, checks, hallazgos, veredicto y limitaciones |
 | **smoke** | comprobación manual del flujo real, con evidencia registrada |
 
 
